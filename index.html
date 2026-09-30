@@ -162,10 +162,10 @@
       </div>
       <div class="hint" id="photo-hint">Prefira uma foto quadrada, de rosto centralizado.</div>
       <div class="photo-controls" id="photo-controls">
-        <div class="hint">Arraste a foto na pré-visualização ou use os controles abaixo para posicionar e ajustar o enquadramento.</div>
+        <div class="hint">Arraste a foto livremente na pré-visualização (em qualquer direção) ou use os controles abaixo. Áreas não cobertas pela foto ficam brancas.</div>
         <div class="zoom-row">
           <span class="hint" style="margin:0;">Zoom</span>
-          <input type="range" id="f-zoom" min="1" max="3" step="0.01" value="1">
+          <input type="range" id="f-zoom" min="0.3" max="4" step="0.01" value="1">
         </div>
         <div class="zoom-row">
           <span class="hint" style="margin:0;">Horizontal</span>
@@ -295,28 +295,18 @@ const photoCtx = photoCanvas.getContext('2d');
 
 let originalPhoto = null; // Image object of the raw uploaded photo
 let photoZoom = 1;
-let photoFracX = 0; // -1..1, position within the allowed pan range
-let photoFracY = 0; // -1..1
+let photoOffX = 0; // deslocamento livre em px do canvas interno (sem limites)
+let photoOffY = 0;
+const PAN_SLIDER_RANGE = PHOTO_SIZE; // slider ±100 = ±PHOTO_SIZE px
 
-function getMaxPan(){
+function renderPhoto(){
+  if(!originalPhoto) return;
   const baseScale = Math.max(PHOTO_SIZE / originalPhoto.width, PHOTO_SIZE / originalPhoto.height);
   const eff = baseScale * photoZoom;
   const dw = originalPhoto.width * eff;
   const dh = originalPhoto.height * eff;
-  return {
-    dw, dh,
-    maxPanX: Math.max(0, (dw - PHOTO_SIZE) / 2),
-    maxPanY: Math.max(0, (dh - PHOTO_SIZE) / 2),
-  };
-}
-
-function renderPhoto(){
-  if(!originalPhoto) return;
-  photoFracX = Math.max(-1, Math.min(1, photoFracX));
-  photoFracY = Math.max(-1, Math.min(1, photoFracY));
-  const { dw, dh, maxPanX, maxPanY } = getMaxPan();
-  const dx = (PHOTO_SIZE - dw) / 2 + maxPanX * photoFracX;
-  const dy = (PHOTO_SIZE - dh) / 2 + maxPanY * photoFracY;
+  const dx = (PHOTO_SIZE - dw) / 2 + photoOffX;
+  const dy = (PHOTO_SIZE - dh) / 2 + photoOffY;
 
   photoCtx.clearRect(0, 0, PHOTO_SIZE, PHOTO_SIZE);
   photoCtx.save();
@@ -324,6 +314,10 @@ function renderPhoto(){
   photoCtx.arc(PHOTO_SIZE/2, PHOTO_SIZE/2, PHOTO_SIZE/2, 0, Math.PI*2);
   photoCtx.closePath();
   photoCtx.clip();
+  photoCtx.fillStyle = '#ffffff'; // fundo branco nas áreas que a foto não cobrir
+  photoCtx.fillRect(0, 0, PHOTO_SIZE, PHOTO_SIZE);
+  photoCtx.imageSmoothingEnabled = true;
+  photoCtx.imageSmoothingQuality = 'high';
   photoCtx.drawImage(originalPhoto, dx, dy, dw, dh);
   photoCtx.restore();
 
@@ -333,17 +327,15 @@ function renderPhoto(){
   $('photo-initials').style.display = 'none';
   $('mini-preview').src = url;
 
-  $('f-panx').value = Math.round(photoFracX * 100);
-  $('f-pany').value = Math.round(photoFracY * 100);
+  $('f-panx').value = Math.round(photoOffX / PAN_SLIDER_RANGE * 100);
+  $('f-pany').value = Math.round(photoOffY / PAN_SLIDER_RANGE * 100);
+  $('f-zoom').value = photoZoom;
 }
 
 function resetPhotoPosition(){
   photoZoom = 1;
-  photoFracX = 0;
-  photoFracY = 0;
-  $('f-zoom').value = 1;
-  $('f-panx').value = 0;
-  $('f-pany').value = 0;
+  photoOffX = 0;
+  photoOffY = 0;
   renderPhoto();
 }
 
@@ -369,42 +361,41 @@ $('f-zoom').addEventListener('input', (e) => {
   renderPhoto();
 });
 $('f-panx').addEventListener('input', (e) => {
-  photoFracX = parseFloat(e.target.value) / 100;
+  photoOffX = parseFloat(e.target.value) / 100 * PAN_SLIDER_RANGE;
   renderPhoto();
 });
 $('f-pany').addEventListener('input', (e) => {
-  photoFracY = parseFloat(e.target.value) / 100;
+  photoOffY = parseFloat(e.target.value) / 100 * PAN_SLIDER_RANGE;
   renderPhoto();
 });
 $('btn-reset-photo').addEventListener('click', resetPhotoPosition);
 
-// drag to pan (with native image/element drag-ghost fully disabled)
+// arrastar para mover livremente, em qualquer direção (sem travar nas bordas)
 (function(){
   const el = $('photo-circle');
   el.addEventListener('dragstart', (e) => e.preventDefault());
   el.addEventListener('selectstart', (e) => e.preventDefault());
 
   let dragging = false;
-  let startX = 0, startY = 0, startFracX = 0, startFracY = 0;
-  const ratio = PHOTO_SIZE / PHOTO_CONTAINER;
+  let startX = 0, startY = 0, startOffX = 0, startOffY = 0;
 
   el.addEventListener('pointerdown', (e) => {
     if(!originalPhoto) return;
     e.preventDefault();
     dragging = true;
     startX = e.clientX; startY = e.clientY;
-    startFracX = photoFracX; startFracY = photoFracY;
+    startOffX = photoOffX; startOffY = photoOffY;
     el.classList.add('dragging');
     el.setPointerCapture(e.pointerId);
   });
   el.addEventListener('pointermove', (e) => {
     if(!dragging) return;
     e.preventDefault();
-    const { maxPanX, maxPanY } = getMaxPan();
-    const deltaPxX = (e.clientX - startX) * ratio;
-    const deltaPxY = (e.clientY - startY) * ratio;
-    photoFracX = startFracX + (maxPanX > 0 ? deltaPxX / maxPanX : 0);
-    photoFracY = startFracY + (maxPanY > 0 ? deltaPxY / maxPanY : 0);
+    // converte px de tela -> px do canvas interno usando o tamanho real exibido do círculo
+    const rect = el.getBoundingClientRect();
+    const ratio = PHOTO_SIZE / (rect.width || PHOTO_CONTAINER);
+    photoOffX = startOffX + (e.clientX - startX) * ratio;
+    photoOffY = startOffY + (e.clientY - startY) * ratio;
     renderPhoto();
   });
   const endDrag = (e) => {
@@ -414,7 +405,7 @@ $('btn-reset-photo').addEventListener('click', resetPhotoPosition);
   };
   el.addEventListener('pointerup', endDrag);
   el.addEventListener('pointercancel', endDrag);
-  el.addEventListener('pointerleave', endDrag);
+  el.addEventListener('lostpointercapture', endDrag);
 })();
 
 // tamanho final do PNG exportado (largura em px) - compacto, padrão de assinatura de e-mail
